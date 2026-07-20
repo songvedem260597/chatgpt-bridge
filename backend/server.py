@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .bridge_state import state
@@ -59,6 +60,14 @@ app = FastAPI(
     description="通过油猴脚本桥接,让 agent 控制 ChatGPT 网页版窗口。"
                 "装好油猴脚本后,agent 通过本 API 发消息、读回复、监控页面状态。",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

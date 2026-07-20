@@ -1,22 +1,56 @@
 // ==UserScript==
 // @name         ChatGPT WebUI Bridge
 // @namespace    https://github.com/yourname/chatgpt-bridge
-// @version      1.0.0
-// @description  Expose logged-in ChatGPT pages to a local agent through an HTTP bridge. Supports multiple tabs, snapshots, and auto-reconnect.
+// @version      2.0.0
+// @description  Expose logged-in ChatGPT pages to a local agent through an HTTP bridge. Auto-downloads generated images.
 // @author       You
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
+// @grant        GM_download
 // @connect      127.0.0.1
 // @connect      localhost
 // @run-at       document-idle
 // ==/UserScript==
 
-// ====================== 配置(按需修改) ======================
-const BACKEND_URL = 'http://127.0.0.1:5000';  // Backend URL
-const POLL_INTERVAL = 400;                      // 轮询间隔(ms)
-// =============================================================
+// ====================== Config ======================
+const BACKEND_URL = 'http://127.0.0.1:5000';
+const POLL_INTERVAL = 400;
+// ====================================================
+
+// ====== MutationObserver: capture image URLs as they appear in DOM ======
+const _capturedImageUrls = [];
+const _seenUrls = new Set();
+
+const _imgObserver = new MutationObserver((mutations) => {
+  for (const mutation of mutations) {
+    for (const node of mutation.addedNodes) {
+      if (node.nodeType !== 1) continue;
+      const imgs = node.tagName === 'IMG' ? [node] : [...node.querySelectorAll('img')];
+      for (const img of imgs) {
+        const src = img.src || img.getAttribute('src') || '';
+        if (src && (src.includes('oaiusercontent.com') || src.includes('files.openai.com'))
+            && !_seenUrls.has(src)) {
+          _seenUrls.add(src);
+          _capturedImageUrls.push(src);
+          console.log('[Bridge v2] Captured image URL:', src);
+        }
+      }
+    }
+    // Also check attribute changes (lazy-loaded images)
+    if (mutation.type === 'attributes' && mutation.target.tagName === 'IMG') {
+      const img = mutation.target;
+      const src = img.src || '';
+      if (src && (src.includes('oaiusercontent.com') || src.includes('files.openai.com'))
+          && !_seenUrls.has(src)) {
+        _seenUrls.add(src);
+        _capturedImageUrls.push(src);
+        console.log('[Bridge v2] Captured lazy image URL:', src);
+      }
+    }
+  }
+});
 
 (function () {
   'use strict';
@@ -173,7 +207,7 @@ const POLL_INTERVAL = 400;                      // 轮询间隔(ms)
     }
 
     const start = Date.now();
-    const TIMEOUT = 90000;
+    const TIMEOUT = 180000; // 180s to handle DALL-E image generation
     let sawNew = false;
     let genDetected = false;
     while (Date.now() - start < TIMEOUT) {
@@ -207,8 +241,104 @@ const POLL_INTERVAL = 400;                      // 轮询间隔(ms)
     return 'ok';
   }
 
+  // ====== Image detection & auto-download ======
+  function getImageUrls() {
+    const urls = [];
+    const seen = new Set();
+    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!msgs.length) return urls;
+    const lastMsg = msgs[msgs.length - 1];
+
+    // Scan all img tags in last assistant message
+    lastMsg.querySelectorAll('img').forEach(img => {
+      const src = img.src || img.getAttribute('src') || '';
+      if (src.startsWith('http') && !seen.has(src)
+          && !src.includes('avatar') && !src.includes('icon')
+          && !src.includes('logo') && !src.includes('spinner')) {
+        urls.push(src);
+        seen.add(src);
+      }
+    });
+
+    // Also check for picture/source tags
+    lastMsg.querySelectorAll('picture source').forEach(s => {
+      const src = s.srcset || s.src || '';
+      if (src.startsWith('http') && !seen.has(src)) {
+        urls.push(src.split(' ')[0]);
+        seen.add(src);
+      }
+    });
+
+    return urls;
+  }
+
+  // Click ChatGPT's own download button for generated images
+  async function clickChatGPTDownloadButtons() {
+    const selectors = [
+      'button[aria-label*="ownload"]',
+      'button[data-testid*="download"]',
+      'a[download]',
+      'button[aria-label*="Save"]',
+    ];
+    let clicked = 0;
+    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!msgs.length) return clicked;
+    const lastMsg = msgs[msgs.length - 1];
+    for (const sel of selectors) {
+      lastMsg.querySelectorAll(sel).forEach(btn => {
+        if (btn.offsetParent !== null) { btn.click(); clicked++; }
+      });
+    }
+    return clicked;
+  }
+
+  async function autoDownloadImages(urls) {
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const a = document.createElement('a');
+        a.href = urls[i];
+        a.download = 'chatgpt_image_' + Date.now() + '_' + i + '.webp';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        await sleep(600);
+      } catch(e) {
+        console.warn('[Bridge] Could not auto-download image:', e);
+      }
+    }
+  }
+
   async function processCommand(cmd) {
-    if (cmd.cmd === 'send') return { ok: true, reply: await sendMessage(cmd.text) };
+    if (cmd.cmd === 'send') {
+      // Reset captured images before sending
+      _capturedImageUrls.length = 0;
+      const reply = await sendMessage(cmd.text);
+      // Wait for images to fully render in DOM
+      await sleep(3000);
+      const imageUrls = [..._capturedImageUrls];
+      if (imageUrls.length > 0) {
+        console.log('[Bridge v2] Auto-downloading', imageUrls.length, 'image(s)...');
+        for (let i = 0; i < imageUrls.length; i++) {
+          try {
+            if (typeof GM_download !== 'undefined') {
+              GM_download({ url: imageUrls[i], name: 'chatgpt_' + Date.now() + '_' + i + '.webp' });
+            } else {
+              const a = document.createElement('a');
+              a.href = imageUrls[i];
+              a.download = 'chatgpt_' + Date.now() + '_' + i + '.webp';
+              a.style.display = 'none';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+            }
+            await sleep(500);
+          } catch(e) { console.warn('[Bridge v2] Download error:', e); }
+        }
+      }
+      console.log('[Bridge v2] imageUrls:', imageUrls);
+      return { ok: true, reply, imageUrls };
+    }
     if (cmd.cmd === 'new_chat') return { ok: true, result: newChat() };
     return { ok: false, error: 'unknown command: ' + cmd.cmd };
   }
@@ -281,10 +411,13 @@ const POLL_INTERVAL = 400;                      // 轮询间隔(ms)
   });
 
   // ====== 启动 ======
+  // Start MutationObserver to capture generated images
+  _imgObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+
   setStatus('connecting...', '#c83');
   gmFetch('POST', '/register', { page_id: PAGE_ID, url: location.href, title: document.title })
-    .then(() => setStatus('ready', '#2a2'))
+    .then(() => setStatus('ready v2', '#2a2'))
     .catch(() => setStatus('service offline', '#c33'));
   poll();
-  console.log('[ChatGPT Bridge] loaded, backend:', BASE, 'page id:', PAGE_ID);
+  console.log('[ChatGPT Bridge v2] loaded, backend:', BASE, 'page id:', PAGE_ID);
 })();
