@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import subprocess
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -43,10 +43,14 @@ def local_status():
 @router.post("/execute")
 def execute_local_tool(req: LocalToolReq):
     try:
-        return _executor().execute(req.model_dump(exclude_none=True))
+        if hasattr(req, "model_dump"):
+            payload = req.model_dump(exclude_none=True)
+        else:
+            payload = req.dict(exclude_none=True)
+        return _executor().execute(payload)
     except LocalToolError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except TimeoutError as exc:
+    except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=408, detail="command timed out") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"local tool failed: {exc}") from exc
