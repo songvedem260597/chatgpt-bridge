@@ -2,8 +2,11 @@ const TOOL_MARKER_RE = /\[\[LOCAL_TOOL\]\]\s*([\s\S]*?)\s*\[\[\/LOCAL_TOOL\]\]/g
 const LEGACY_TOOL_BLOCK_RE = /```local_tool\s*([\s\S]*?)```/gi;
 const SEEN_KEY = 'chatgpt-local-bridge-seen-v2';
 const MAX_RESULT_MESSAGE_CHARS = 24000;
+const STABLE_TURN_MS = 750;
 
 let scanning = false;
+let candidateKey = '';
+let candidateSince = 0;
 const seenBlocks = new Set(loadSeen());
 
 function loadSeen() {
@@ -62,6 +65,43 @@ function hash(text) {
     h = Math.imul(h, 16777619);
   }
   return String(h >>> 0);
+}
+
+function isGenerating() {
+  const stopSelectors = [
+    'button[data-testid="stop-button"]',
+    'button[aria-label="Stop generating"]',
+    'button[aria-label*="Stop streaming"]',
+    'button[aria-label="Stop answering"]',
+  ];
+  if (stopSelectors.some((selector) => document.querySelector(selector))) return true;
+
+  const submit = document.querySelector('#composer-submit-button');
+  const submitLabel = `${submit?.getAttribute?.('aria-label') || ''} ${submit?.textContent || ''}`;
+  return Boolean(submit && /\bstop\b/i.test(submitLabel));
+}
+
+function latestAssistantTurn() {
+  const turns = [...document.querySelectorAll('[data-message-author-role]')];
+  const latest = turns[turns.length - 1];
+  return latest?.getAttribute?.('data-message-author-role') === 'assistant' ? latest : null;
+}
+
+function messageIdentity(message, text) {
+  const explicitId = message?.getAttribute?.('data-message-id')
+    || message?.closest?.('[data-message-id]')?.getAttribute?.('data-message-id')
+    || message?.id
+    || '';
+  return explicitId ? `message:${explicitId}` : `content:${hash(text)}`;
+}
+
+function toolBlockId(message, text, raw) {
+  return hash(`${location.pathname}\n${messageIdentity(message, text)}\n${raw}`);
+}
+
+function resetCandidate() {
+  candidateKey = '';
+  candidateSince = 0;
 }
 
 function clipMessage(text) {
@@ -153,6 +193,19 @@ function collectToolBlocks(text) {
   return blocks;
 }
 
+function primeExistingLatestTurn() {
+  // Loading/reloading the extension must never execute tool blocks that were already
+  // sitting in conversation history. If a response is actively streaming we leave it
+  // unprimed so a newly completed tool block can still execute once.
+  if (isGenerating()) return;
+  const message = latestAssistantTurn();
+  if (!message) return;
+  const text = message.innerText || '';
+  for (const raw of collectToolBlocks(text)) {
+    rememberSeen(toolBlockId(message, text, raw));
+  }
+}
+
 async function scan() {
   if (scanning) return;
   scanning = true;
@@ -160,30 +213,54 @@ async function scan() {
   try {
     const settingsResp = await chrome.runtime.sendMessage({ type: 'bridge:get-settings' });
     if (!settingsResp?.settings?.enabled || !settingsResp?.settings?.autoExecute) return;
+    if (isGenerating()) {
+      resetCandidate();
+      return;
+    }
 
-    const messages = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-    const recent = messages.slice(-4);
+    // Only the newest conversation turn is eligible, and it must be an assistant turn.
+    // This prevents old tool examples or completed requests from replaying when ChatGPT
+    // virtualizes/reorders DOM nodes or while a newer user result is already pending.
+    const message = latestAssistantTurn();
+    if (!message) {
+      resetCandidate();
+      return;
+    }
 
-    for (let localIndex = 0; localIndex < recent.length; localIndex++) {
-      const msg = recent[localIndex];
-      const text = msg.innerText || '';
-      const blocks = collectToolBlocks(text);
+    const text = message.innerText || '';
+    const blocks = collectToolBlocks(text);
+    if (!blocks.length) {
+      resetCandidate();
+      return;
+    }
 
-      for (const raw of blocks) {
-        // Include the assistant turn position so the same command can intentionally run again
-        // in a later turn, while reloads in the same tab remain deduplicated via sessionStorage.
-        const turnIndex = messages.length - recent.length + localIndex;
-        const id = hash(location.pathname + '\n' + turnIndex + '\n' + raw);
-        if (seenBlocks.has(id)) continue;
-        rememberSeen(id);
+    // One assistant turn produces at most one automatic result message. If the model
+    // includes examples plus a real request, the final LOCAL_TOOL block is the request
+    // closest to the end of the response.
+    const raw = blocks[blocks.length - 1];
+    const id = toolBlockId(message, text, raw);
+    if (seenBlocks.has(id)) {
+      resetCandidate();
+      return;
+    }
 
-        try {
-          await executeBlock(raw);
-        } catch (error) {
-          console.error('[ChatGPT Local Bridge] tool execution failed:', error);
-          setBadge('Bridge error', '#dc2626');
-        }
-      }
+    // ChatGPT can remove the stop button slightly before the final DOM paint. Require
+    // the same latest-turn content to remain unchanged briefly before executing it.
+    const nextCandidateKey = `${messageIdentity(message, text)}:${hash(text)}:${hash(raw)}`;
+    if (candidateKey !== nextCandidateKey) {
+      candidateKey = nextCandidateKey;
+      candidateSince = Date.now();
+      return;
+    }
+    if (Date.now() - candidateSince < STABLE_TURN_MS) return;
+
+    rememberSeen(id);
+    resetCandidate();
+    try {
+      await executeBlock(raw);
+    } catch (error) {
+      console.error('[ChatGPT Local Bridge] tool execution failed:', error);
+      setBadge('Bridge error', '#dc2626');
     }
   } finally {
     scanning = false;
@@ -208,6 +285,7 @@ badge.onclick = async () => {
 
 document.documentElement.appendChild(badge);
 
+primeExistingLatestTurn();
 const observer = new MutationObserver(() => { void scan(); });
 observer.observe(document.documentElement, { childList: true, subtree: true });
 setInterval(() => { void scan(); }, 1500);
