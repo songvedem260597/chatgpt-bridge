@@ -2,6 +2,21 @@
 
 Chrome Manifest V3 extension that lets a normal ChatGPT web conversation call a restricted localhost coding executor.
 
+## Why this version avoids the Browser Layer problem
+
+This extension uses **plain-text messages only** inside ChatGPT:
+
+- it does not upload markdown files
+- it does not create ChatGPT attachments
+- it does not call MCP, Work, Codex, or ChatGPT tool APIs
+- it does not create `File`, `Blob`, or `DataTransfer` uploads
+- it refuses to auto-send if the ChatGPT composer already has a pending attachment
+- large local results are truncated before being sent back into ChatGPT
+
+That means the bridge loop is based on normal text chat rather than attachment/advanced-feature transport.
+
+This cannot guarantee that ChatGPT will never apply account/workspace limits of its own; it only ensures this extension does not deliberately invoke file-upload or advanced-tool flows.
+
 ## Install
 
 1. Pull branch `feature/chrome-extension-local-tools`.
@@ -21,15 +36,21 @@ python run.py
 6. Click **Load unpacked** and select the repository's `extension` folder.
 7. Open `https://chatgpt.com` and click the extension icon.
 8. Click **Test**. `/local/status` should show the configured workspace.
-9. Enable **Auto execute local_tool blocks** only when you want the current ChatGPT page to execute tool blocks automatically.
+9. Enable **Auto execute local_tool blocks** only when you want the current ChatGPT page to execute tool commands automatically.
 
 Auto execution is OFF by default.
 
 ## Protocol
 
-The extension scans assistant messages for fenced blocks named `local_tool`.
+Preferred v2 plain-text marker format:
 
-Example:
+```text
+[[LOCAL_TOOL]]
+{"action":"list_dir","path":"."}
+[[/LOCAL_TOOL]]
+```
+
+The older fenced format is still recognized for compatibility:
 
 ````markdown
 ```local_tool
@@ -37,7 +58,7 @@ Example:
 ```
 ````
 
-The extension sends that JSON to `POST /local/execute`, then places a new user message back into ChatGPT:
+The extension sends that JSON to `POST /local/execute`, then places a new normal user text message back into ChatGPT:
 
 ```text
 [LOCAL_RESULT]
@@ -47,7 +68,7 @@ The extension sends that JSON to `POST /local/execute`, then places a new user m
 }
 ```
 
-This allows the same ChatGPT conversation to inspect the result and issue another tool request.
+No file is created or attached for this result.
 
 ## Supported actions
 
@@ -112,12 +133,14 @@ On Windows, `.cmd` names such as `npm.cmd`, `pnpm.cmd`, `npx.cmd` are generally 
 - File reads/writes are capped at 2 MB.
 - Command output is truncated before returning to ChatGPT.
 - Auto execution is opt-in.
+- Plain-text mode refuses auto-send while an attachment is present in the composer.
 
 Do not expose the backend port to LAN or the public Internet without adding authentication.
 
-## Current v1 limitations
+## Current limitations
 
-- No screenshot/upload pipeline yet.
+- No screenshot/upload pipeline yet. This is intentional while keeping transport text-only.
 - No patch/hunk editor yet; `write_file` replaces a whole UTF-8 file.
 - No interactive/long-running process management yet.
 - DOM selectors can need maintenance when ChatGPT changes its web UI.
+- ChatGPT may still enforce independent workspace/account limits unrelated to this extension.
