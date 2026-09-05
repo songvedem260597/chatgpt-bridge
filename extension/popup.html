@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ChatGPT Local Bridge</title>
+  <style>
+    body{font:13px system-ui;margin:14px;width:300px;color:#111}label{display:block;margin:10px 0 4px}input[type=text]{width:100%;box-sizing:border-box;padding:7px}button{margin-top:10px;padding:7px 10px}#status{margin-top:10px;white-space:pre-wrap} .row{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <strong>ChatGPT Local Bridge</strong>
+  <label>Backend URL</label>
+  <input id="backend" type="text" value="http://127.0.0.1:5000" />
+  <label class="row"><input id="enabled" type="checkbox" /> Enabled</label>
+  <label class="row"><input id="auto" type="checkbox" /> Auto execute local_tool blocks</label>
+  <div class="row"><button id="save">Save</button><button id="test">Test</button></div>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
