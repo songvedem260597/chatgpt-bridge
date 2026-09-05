@@ -157,14 +157,36 @@ async function sendToComposer(text) {
   }
 }
 
-function formatResult(request, response) {
-  return '[LOCAL_RESULT]\n' + JSON.stringify({ request, response }, null, 2);
+function normalizeRequests(parsed) {
+  const requests = Array.isArray(parsed)
+    ? parsed
+    : (Array.isArray(parsed?.calls) ? parsed.calls : [parsed]);
+  if (!requests.length) throw new Error('LOCAL_TOOL batch is empty');
+  if (requests.some((request) => !request || typeof request !== 'object' || Array.isArray(request))) {
+    throw new Error('LOCAL_TOOL requests must be JSON objects');
+  }
+  return requests;
+}
+
+function formatResults(requests, responses) {
+  if (requests.length === 1) {
+    return '[LOCAL_RESULT]\n' + JSON.stringify({
+      request: requests[0],
+      response: responses[0],
+      batch_hint: 'Batch independent next tools in one LOCAL_TOOL JSON array to reduce chat round trips.',
+    }, null, 2);
+  }
+
+  return '[LOCAL_RESULT]\n' + JSON.stringify({
+    batch: true,
+    results: requests.map((request, index) => ({ request, response: responses[index] })),
+  }, null, 2);
 }
 
 async function executeBlock(raw) {
-  let request;
+  let requests;
   try {
-    request = JSON.parse(raw);
+    requests = normalizeRequests(JSON.parse(raw));
   } catch (error) {
     await sendToComposer('[LOCAL_RESULT]\n' + JSON.stringify({
       ok: false,
@@ -173,12 +195,19 @@ async function executeBlock(raw) {
     return;
   }
 
-  const response = await chrome.runtime.sendMessage({
-    type: 'bridge:execute',
-    request,
-  });
+  const responses = [];
+  for (const request of requests) {
+    try {
+      responses.push(await chrome.runtime.sendMessage({
+        type: 'bridge:execute',
+        request,
+      }));
+    } catch (error) {
+      responses.push({ ok: false, error: String(error?.message || error) });
+    }
+  }
 
-  await sendToComposer(formatResult(request, response));
+  await sendToComposer(formatResults(requests, responses));
 }
 
 function collectToolBlocks(text) {

@@ -157,4 +157,19 @@ await context.scan();
 assert.equal(executed.length, 3);
 assert.equal(executed[2].path, 'AGENTS.md');
 
+// Independent requests can be batched into one LOCAL_TOOL block and one LOCAL_RESULT message.
+turns.push(makeTurn('user', 'user-4', '[LOCAL_RESULT] AGENTS result'));
+turns.push(makeTurn('assistant', 'batch-read', '[[LOCAL_TOOL]]\n[{"action":"read_file","path":"AGENTS.md"},{"action":"read_file","path":"package.json"}]\n[[/LOCAL_TOOL]]'));
+const sentBeforeBatch = sent.length;
+await context.scan();
+await new Promise((resolve) => setTimeout(resolve, 800));
+await context.scan();
+assert.equal(executed.length, 5, 'batch did not execute both local requests');
+assert.equal(executed[3].path, 'AGENTS.md');
+assert.equal(executed[4].path, 'package.json');
+assert.equal(sent.length, sentBeforeBatch + 1, 'batch should send exactly one LOCAL_RESULT message');
+assert.match(sent.at(-1), /"batch": true/);
+assert.match(sent.at(-1), /"path": "AGENTS.md"/);
+assert.match(sent.at(-1), /"path": "package.json"/);
+
 console.log('local-bridge-replay-smoke: ok');

@@ -50,6 +50,20 @@ Preferred v2 plain-text marker format:
 [[/LOCAL_TOOL]]
 ```
 
+To reduce chat round trips, batch independent operations in one block as a JSON array:
+
+```text
+[[LOCAL_TOOL]]
+[
+  {"action":"read_file","path":"AGENTS.md"},
+  {"action":"read_file","path":"package.json"},
+  {"action":"git_status","cwd":"."}
+]
+[[/LOCAL_TOOL]]
+```
+
+The extension executes the batch locally and sends one combined `[LOCAL_RESULT]` message back to ChatGPT. Dependent operations should still be sent in separate turns when a later command needs an earlier result.
+
 The older fenced format is still recognized for compatibility:
 
 ````markdown
