@@ -4,7 +4,7 @@ async function getSettings() {
   const data = await chrome.storage.local.get({
     backendUrl: DEFAULT_BASE,
     enabled: true,
-    autoExecute: true,
+    autoExecute: false,
   });
   return data;
 }
